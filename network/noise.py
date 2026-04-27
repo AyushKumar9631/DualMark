@@ -1,27 +1,7 @@
-"""
-network/noise.py  —  Simple, self-contained noise layers for training.
-
-pool_R  (robustness — used for DecoderR training):
-    Identity, MedianBlur, Resize, GaussianBlur, GaussianNoise,
-    Brightness, Contrast, SaltPepper, Dropout
-
-    JpegTest removed — it does disk I/O per image inside the training loop
-    which causes severe slowdowns. GaussianNoise + Resize already cover the
-    high-frequency loss that JPEG would simulate.
-
-apply_explicit_F  (forgery simulation — used for DecoderF training):
-    Splices a random rectangle from a shuffled-batch image into the encoded
-    image and returns (forged, exact_mask).  The mask is always non-zero so
-    DecoderF always has a real forgery signal to learn from.
-
-No external pretrained models required.
-"""
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import kornia.augmentation as K
 import random
 
 
@@ -31,14 +11,12 @@ class Identity(nn.Module):
 
 
 class MedianBlur(nn.Module):
-    """Fast approximate median blur via average pooling — no disk I/O."""
     def __init__(self, kernel_size=3):
         super().__init__()
         self.k = kernel_size
         self.pad = kernel_size // 2
     def forward(self, encoded, cover):
-        x = F.avg_pool2d(encoded, self.k, stride=1, padding=self.pad)
-        return x.clamp(-1, 1)
+        return F.avg_pool2d(encoded, self.k, stride=1, padding=self.pad).clamp(-1, 1)
 
 
 class Resize(nn.Module):
@@ -51,11 +29,21 @@ class Resize(nn.Module):
 
 
 class GaussianBlur(nn.Module):
-    def __init__(self):
+    """Pure PyTorch Gaussian blur — no kornia needed."""
+    def __init__(self, kernel_size=3, sigma=1.5):
         super().__init__()
-        self.aug = K.RandomGaussianBlur((3,3), (1,2), p=1.0)
+        self.kernel_size = kernel_size
+        self.padding = kernel_size // 2
+        # Build fixed Gaussian kernel
+        x = torch.arange(kernel_size).float() - kernel_size // 2
+        gauss = torch.exp(-x**2 / (2 * sigma**2))
+        gauss = gauss / gauss.sum()
+        kernel = gauss.unsqueeze(0) * gauss.unsqueeze(1)
+        kernel = kernel.unsqueeze(0).unsqueeze(0)   # (1,1,k,k)
+        self.register_buffer('kernel', kernel.repeat(3, 1, 1, 1))
+
     def forward(self, encoded, cover):
-        return self.aug(encoded)
+        return F.conv2d(encoded, self.kernel, padding=self.padding, groups=3).clamp(-1, 1)
 
 
 class GaussianNoise(nn.Module):
@@ -63,25 +51,24 @@ class GaussianNoise(nn.Module):
         super().__init__()
         self.std = std
     def forward(self, encoded, cover):
-        return (encoded + torch.randn_like(encoded) * self.std).clamp(-1,1)
+        return (encoded + torch.randn_like(encoded) * self.std).clamp(-1, 1)
 
 
 class Brightness(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.aug = K.ColorJitter(brightness=0.4, p=1.0)
+    """Random brightness shift — no kornia needed."""
     def forward(self, encoded, cover):
+        factor = 1.0 + (torch.rand(1).item() - 0.5) * 0.8   # [0.6, 1.4]
         x = (encoded + 1) / 2
-        return self.aug(x) * 2 - 1
+        return (x * factor).clamp(0, 1) * 2 - 1
 
 
 class Contrast(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.aug = K.ColorJitter(contrast=0.4, p=1.0)
+    """Random contrast adjustment — no kornia needed."""
     def forward(self, encoded, cover):
+        factor = 1.0 + (torch.rand(1).item() - 0.5) * 0.8   # [0.6, 1.4]
         x = (encoded + 1) / 2
-        return self.aug(x) * 2 - 1
+        mean = x.mean(dim=[2, 3], keepdim=True)
+        return ((mean + factor * (x - mean)).clamp(0, 1)) * 2 - 1
 
 
 class SaltPepper(nn.Module):
@@ -89,15 +76,14 @@ class SaltPepper(nn.Module):
         super().__init__()
         self.prob = prob
     def forward(self, encoded, cover):
-        out = encoded.clone()
+        out  = encoded.clone()
         mask = torch.rand_like(encoded)
-        out[mask < self.prob/2]   =  1.0
-        out[mask > 1-self.prob/2] = -1.0
+        out[mask < self.prob / 2]   =  1.0
+        out[mask > 1 - self.prob/2] = -1.0
         return out
 
 
 class Dropout(nn.Module):
-    """Replace random pixels with cover-image pixels."""
     def __init__(self, prob=0.15):
         super().__init__()
         self.prob = prob
@@ -111,7 +97,7 @@ class Dropout(nn.Module):
 
 POOL_R = [
     Identity(),
-    MedianBlur(kernel_size=3),   # replaces JpegTest — fast, no disk I/O
+    MedianBlur(kernel_size=3),
     Resize(scale=0.5),
     GaussianBlur(),
     GaussianNoise(std=0.05),
@@ -123,31 +109,15 @@ POOL_R = [
 
 
 def apply_random_R(encoded, cover):
-    """Apply a random robustness distortion from POOL_R."""
     layer = random.choice(POOL_R)
     return layer(encoded, cover)
 
 
-# ── explicit forgery (rectangle splice) ──────────────────────────────────────
-
 def apply_explicit_F(encoded, images):
-    """
-    Create a ground-truth forgery by splicing a random rectangle from a
-    shuffled batch of cover images into the encoded image.
-
-    Returns (forged, mask) where mask is EXPLICITLY constructed — not derived
-    from pixel diffs. This ensures the ground-truth label is always correct
-    regardless of how subtle the watermark embedding is.
-
-    The spliced region covers 33–83% of both H and W, starting from a random
-    offset in the top-left third, so DecoderF always sees a meaningful
-    manipulated area to learn from.
-    """
     B, C, H, W = encoded.shape
     forged = encoded.clone()
     mask   = torch.zeros(B, 1, H, W, device=encoded.device)
 
-    # Shuffle batch so each image gets pixels from a *different* image
     idx   = torch.randperm(B, device=encoded.device)
     other = images[idx]
 
