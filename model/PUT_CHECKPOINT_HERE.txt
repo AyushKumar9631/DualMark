@@ -1,0 +1,5 @@
+Place your trained checkpoint file here.
+Rename it to: checkpoint.pth
+
+This file must be tracked with Git LFS.
+Run: git lfs track "model/*.pth" before adding it.
