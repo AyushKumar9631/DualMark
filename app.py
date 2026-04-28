@@ -16,7 +16,7 @@ from watermark import make_watermark, decode_watermark, bit_accuracy
 
 # ── Config ────────────────────────────────────────────────────────────────────
 CKPT_PATH       = "model/checkpoint.pth"   # <-- place your .pth file here
-ENCODE_STRENGTH = 0.3                       # must match training
+ENCODE_STRENGTH = 0.1                       # must match training
 MSG_LEN         = 128
 CHANNELS        = 32
 IMG_SIZE        = 128
