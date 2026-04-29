@@ -160,35 +160,9 @@ def detect_forgery(image):
     manip = prob_map.mean().item()
     p     = prob_map.squeeze().cpu().numpy()
 
-    # ── Spatially-varying threshold heatmap ───────────────────────────────────
-    # The model's center bias means the face region is ALWAYS elevated.
-    # Previous attempts (Gaussian subtraction, modal baseline) all failed
-    # because the face mound is nearly flat and too wide to subtract cleanly.
-    #
-    # User's insight: raise the threshold specifically in the center region.
-    # "Center" is defined from the probability map itself — the high-probability
-    # blob IS the face bias region.
-    #
-    #   Center/face region  → require p > 0.90 to appear red
-    #                         (filters out the 0.55–0.75 face bias noise;
-    #                          only genuine high-confidence forgery triggers it)
-    #   Background region   → require p > 0.60
-    #                         (background pixels rarely exceed 0.35,
-    #                          so spliced-in patches stand out immediately)
-    from scipy.ndimage import gaussian_filter as _gf
-    p_sm       = _gf(p, sigma=3)          # light smooth to get a clean blob
-    center_mask = p_sm > 0.50             # True = face/center bias region
-
-    thresh = np.where(center_mask, 0.99, 0.60)   # spatially adaptive bar
-    p_above = np.clip(p - thresh, 0, None)
-
-    # SCALE=0.10 → pixel at p=0.90 starts showing; p=1.00 is fully red
-    SCALE  = 0.10
-    p_norm = np.clip(p_above / SCALE, 0, 1)
-
     heatmap        = np.zeros((p.shape[0], p.shape[1], 3), dtype=np.uint8)
-    heatmap[:,:,0] = (p_norm * 255).clip(0, 255).astype(np.uint8)
-    heatmap[:,:,2] = ((1 - p_norm) * 255).clip(0, 255).astype(np.uint8)
+    heatmap[:,:,0] = (p * 255).clip(0, 255).astype(np.uint8)
+    heatmap[:,:,2] = ((1 - p) * 255).clip(0, 255).astype(np.uint8)
     heatmap_pil    = Image.fromarray(heatmap).resize(image.size, Image.BILINEAR)
 
     if manip > 0.35:
