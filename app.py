@@ -421,6 +421,10 @@ button.primary:hover, .gr-button-primary:hover {
     font-size: 0.83rem;
     color: #8a9ab8;
 }
+.out-md td:first-child, .out-md th:first-child {
+    white-space: nowrap;
+    width: 1%;
+}
 .out-md code {
     font-family: 'JetBrains Mono', monospace !important;
     font-size: 0.78rem !important;
