@@ -160,34 +160,31 @@ def detect_forgery(image):
     manip = prob_map.mean().item()
     p     = prob_map.squeeze().cpu().numpy()
 
-    # ── Modal-baseline heatmap (center-bias fix) ──────────────────────────────
-    # WHY Gaussian subtraction failed: the face mound on a 128×128 CelebA-HQ
-    # image is nearly FLAT across the whole frame, not a sharp bell curve.
-    # A Gaussian blur of a flat field ≈ the field itself, so residual ≈ field,
-    # and we're back to the original problem.
+    # ── Spatially-varying threshold heatmap ───────────────────────────────────
+    # The model's center bias means the face region is ALWAYS elevated.
+    # Previous attempts (Gaussian subtraction, modal baseline) all failed
+    # because the face mound is nearly flat and too wide to subtract cleanly.
     #
-    # NEW APPROACH — modal baseline:
-    #   Build a histogram of all 128×128 probability values.
-    #   The histogram peak (mode) is the most common probability level.
-    #   On authentic images the face region dominates the pixel count, so
-    #   modal ≈ face-bias baseline (~0.55–0.70).
-    #   On forged images the authentic face still dominates, so modal is
-    #   the same face-bias baseline.
-    #   → Subtract modal from every pixel; only pixels ABOVE the baseline
-    #     (i.e. splice patches) survive. Authentic faces go to ≈ 0 → blue.
+    # User's insight: raise the threshold specifically in the center region.
+    # "Center" is defined from the probability map itself — the high-probability
+    # blob IS the face bias region.
     #
-    # Absolute scale: splice patches typically push probabilities 0.15–0.30
-    # above the face baseline. Residuals below that threshold stay blue.
-    p_flat    = p.ravel()
-    hist, bin_edges = np.histogram(p_flat, bins=30, range=(0.0, 1.0))
-    modal_idx = int(np.argmax(hist))
-    baseline  = float((bin_edges[modal_idx] + bin_edges[modal_idx + 1]) / 2)
-    # Floor the baseline so background-heavy images don't flag the face area.
-    baseline  = max(baseline, 0.35)
+    #   Center/face region  → require p > 0.90 to appear red
+    #                         (filters out the 0.55–0.75 face bias noise;
+    #                          only genuine high-confidence forgery triggers it)
+    #   Background region   → require p > 0.60
+    #                         (background pixels rarely exceed 0.35,
+    #                          so spliced-in patches stand out immediately)
+    from scipy.ndimage import gaussian_filter as _gf
+    p_sm       = _gf(p, sigma=3)          # light smooth to get a clean blob
+    center_mask = p_sm > 0.50             # True = face/center bias region
 
-    p_above = np.clip(p - baseline, 0, None)
-    SCALE   = 0.15   # residual at which a pixel appears fully red
-    p_norm  = np.clip(p_above / SCALE, 0, 1)
+    thresh = np.where(center_mask, 0.90, 0.60)   # spatially adaptive bar
+    p_above = np.clip(p - thresh, 0, None)
+
+    # SCALE=0.10 → pixel at p=0.90 starts showing; p=1.00 is fully red
+    SCALE  = 0.10
+    p_norm = np.clip(p_above / SCALE, 0, 1)
 
     heatmap        = np.zeros((p.shape[0], p.shape[1], 3), dtype=np.uint8)
     heatmap[:,:,0] = (p_norm * 255).clip(0, 255).astype(np.uint8)
