@@ -160,21 +160,29 @@ def detect_forgery(image):
     manip = prob_map.mean().item()
     p     = prob_map.squeeze().cpu().numpy()
 
-    # ── Percentile-normalised heatmap (fixes model center-bias) ──────────────
-    # The model has a learned center bias from CelebA-HQ (faces always centred),
-    # so raw probabilities are elevated in the face region for every image.
-    # We normalise *within* the image so only pixels that are meaningfully more
-    # suspicious than the rest appear red.  The raw `manip` score used for the
-    # verdict above is left untouched.
-    p5    = np.percentile(p, 5)
-    p95   = np.percentile(p, 95)
-    spread = p95 - p5
-    if spread < 0.05:
-        # Nearly uniform map → no real localised signal; render as solid blue
+    # ── High-pass residual heatmap (fixes model center-bias) ─────────────────
+    # The model has a learned center bias from CelebA-HQ training: face pixels
+    # are always elevated even on authentic images, making the whole face appear
+    # red with raw probabilities.
+    #
+    # Fix: subtract a large-sigma Gaussian blur of the probability map from
+    # itself. The blur captures the broad, slow-varying center bias. What
+    # remains (the residual) is only the sharp, localised anomalies caused by
+    # spliced patches. Authentic images have a smooth face-shaped mound that
+    # cancels out almost completely; forged images have a local spike that
+    # survives the subtraction.
+    #
+    # sigma=15 on a 128x128 map blurs over the ~60-px face region while
+    # preserving patch-sized features (>=10 px).
+    from skimage.filters import gaussian as _gauss
+    p_smooth   = _gauss(p, sigma=15)
+    p_residual = np.clip(p - p_smooth, 0, None)   # only positive deviations
+
+    r_max = p_residual.max()
+    if r_max < 0.04:                               # no real local spike
         p_norm = np.zeros_like(p)
     else:
-        p_norm = (p - p5) / (spread + 1e-8)
-        p_norm = np.clip(p_norm, 0, 1)
+        p_norm = np.clip(p_residual / r_max, 0, 1)
 
     heatmap        = np.zeros((p.shape[0], p.shape[1], 3), dtype=np.uint8)
     heatmap[:,:,0] = (p_norm * 255).clip(0, 255).astype(np.uint8)
