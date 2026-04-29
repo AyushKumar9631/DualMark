@@ -160,9 +160,25 @@ def detect_forgery(image):
     manip = prob_map.mean().item()
     p     = prob_map.squeeze().cpu().numpy()
 
+    # ── Percentile-normalised heatmap (fixes model center-bias) ──────────────
+    # The model has a learned center bias from CelebA-HQ (faces always centred),
+    # so raw probabilities are elevated in the face region for every image.
+    # We normalise *within* the image so only pixels that are meaningfully more
+    # suspicious than the rest appear red.  The raw `manip` score used for the
+    # verdict above is left untouched.
+    p5    = np.percentile(p, 5)
+    p95   = np.percentile(p, 95)
+    spread = p95 - p5
+    if spread < 0.05:
+        # Nearly uniform map → no real localised signal; render as solid blue
+        p_norm = np.zeros_like(p)
+    else:
+        p_norm = (p - p5) / (spread + 1e-8)
+        p_norm = np.clip(p_norm, 0, 1)
+
     heatmap        = np.zeros((p.shape[0], p.shape[1], 3), dtype=np.uint8)
-    heatmap[:,:,0] = (p * 255).clip(0, 255).astype(np.uint8)
-    heatmap[:,:,2] = ((1 - p) * 255).clip(0, 255).astype(np.uint8)
+    heatmap[:,:,0] = (p_norm * 255).clip(0, 255).astype(np.uint8)
+    heatmap[:,:,2] = ((1 - p_norm) * 255).clip(0, 255).astype(np.uint8)
     heatmap_pil    = Image.fromarray(heatmap).resize(image.size, Image.BILINEAR)
 
     if manip > 0.35:
