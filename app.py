@@ -186,6 +186,76 @@ def detect_forgery(image):
     return heatmap_pil, info
 
 
+def forge_image(wm_image, orig_image, num_patches, patch_size_pct, anchor):
+    """
+    Splice `num_patches` rectangles from orig_image (or black) into wm_image,
+    then run the forgery detector on the result.
+    anchor: one of 9 labels like 'Top-Left', 'Center', etc.
+    """
+    import random
+
+    if wm_image is None:
+        return None, None, "Please upload a watermarked image."
+
+    wm   = wm_image.convert("RGB")
+    W, H = wm.size
+    out  = wm.copy()
+
+    # ── Anchor → (col, row) in 0-2 grid ──────────────────────────────────────
+    anchor_map = {
+        "Top-Left":      (0, 0), "Top-Center":    (1, 0), "Top-Right":     (2, 0),
+        "Middle-Left":   (0, 1), "Center":         (1, 1), "Middle-Right":  (2, 1),
+        "Bottom-Left":   (0, 2), "Bottom-Center": (1, 2), "Bottom-Right":  (2, 2),
+    }
+    col, row = anchor_map.get(anchor, (1, 1))
+
+    # The placement zone is the chosen third of the image
+    zone_x0 = (col * W) // 3
+    zone_y0 = (row * H) // 3
+    zone_x1 = ((col + 1) * W) // 3
+    zone_y1 = ((row + 1) * H) // 3
+
+    pw = max(10, int(W * patch_size_pct / 100))
+    ph = max(10, int(H * patch_size_pct / 100))
+
+    patch_infos = []
+    for _ in range(int(num_patches)):
+        # Top-left of the patch, clipped so patch stays inside the zone
+        px = random.randint(zone_x0, max(zone_x0, zone_x1 - pw))
+        py = random.randint(zone_y0, max(zone_y0, zone_y1 - ph))
+        patch_infos.append((px, py, pw, ph))
+
+    import PIL.ImageDraw as ImageDraw
+    for (px, py, pw, ph) in patch_infos:
+        if orig_image is not None:
+            src = orig_image.convert("RGB").resize(wm.size, Image.BILINEAR)
+            patch = src.crop((px, py, px + pw, py + ph))
+        else:
+            patch = Image.new("RGB", (pw, ph), (0, 0, 0))
+        out.paste(patch, (px, py))
+
+    # ── Run forgery detector on the forged image ──────────────────────────────
+    heatmap_pil, detect_info = detect_forgery(out)
+
+    patch_desc = "  ".join(
+        f"Patch {i+1}: ({px},{py}) {pw}×{ph}px"
+        for i, (px, py, pw, ph) in enumerate(patch_infos)
+    )
+    summary = (
+        f"**Forge Summary**\n\n"
+        f"| Setting | Value |\n|---|---|\n"
+        f"| Patches applied | `{int(num_patches)}` |\n"
+        f"| Patch size | `{pw}×{ph} px` ({patch_size_pct:.0f}% of image) |\n"
+        f"| Placement zone | `{anchor}` |\n"
+        f"| Fill source | `{'Original image region' if orig_image else 'Black (no original provided)'}` |\n\n"
+        f"**Patch coordinates**\n\n"
+        f"{patch_desc}\n\n"
+        f"---\n\n"
+        f"{detect_info}"
+    )
+    return out, heatmap_pil, summary
+
+
 # ── CSS ───────────────────────────────────────────────────────────────────────
 css = """
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
@@ -460,6 +530,35 @@ button.primary:hover, .gr-button-primary:hover {
     border: 1px solid #1e2740 !important;
 }
 
+/* ── Forge position grid ── */
+.position-grid > .wrap {
+    display: grid !important;
+    grid-template-columns: repeat(3, 1fr) !important;
+    gap: 5px !important;
+    margin-top: 6px !important;
+}
+.position-grid label {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    background: #0d1120 !important;
+    border: 1px solid #1e2740 !important;
+    border-radius: 6px !important;
+    padding: 7px 4px !important;
+    font-size: 0.72rem !important;
+    font-weight: 500 !important;
+    color: #4a5a7a !important;
+    cursor: pointer !important;
+    transition: border-color 0.15s, color 0.15s !important;
+    text-align: center !important;
+}
+.position-grid label:has(input:checked) {
+    border-color: #3d6099 !important;
+    color: #8ba3cc !important;
+    background: #0f1a2e !important;
+}
+.position-grid input[type="radio"] { display: none !important; }
+
 /* ── Footer ── */
 .dm-footer {
     text-align: center;
@@ -608,6 +707,48 @@ with gr.Blocks(title="DualMark — Invisible Watermarking", css=css, theme=gr.th
             detect_btn.click(detect_forgery,
                              inputs=[detect_img],
                              outputs=[detect_heatmap, detect_result])
+
+        # ── Forge ─────────────────────────────────────────────────────────────
+        with gr.TabItem("Forge Image"):
+            gr.HTML('<div class="tab-desc">Simulate a splice attack by replacing rectangular regions of a watermarked image with areas from an original image (or black patches). The forgery detector runs automatically on the result so you can see how well it catches the tampering.</div>')
+            with gr.Row():
+                # ── Left column: inputs ───────────────────────────────────────
+                with gr.Column(scale=1, min_width=260):
+                    forge_wm_img   = gr.Image(type="pil", label="Watermarked Image (required)",
+                                              elem_classes=["small-img"], height=180)
+                    forge_orig_img = gr.Image(type="pil", label="Original Image (optional — leave blank for black patches)",
+                                              elem_classes=["small-img"], height=180)
+
+                    forge_num = gr.Slider(minimum=1, maximum=12, step=1, value=3,
+                                          label="Number of Patches")
+                    forge_size = gr.Slider(minimum=5, maximum=60, step=1, value=20,
+                                           label="Patch Size (% of image dimension)")
+
+                    gr.HTML('<div style="font-size:0.72rem;font-weight:600;letter-spacing:0.8px;text-transform:uppercase;color:#4a5a7a;margin-top:10px;margin-bottom:4px;">Placement Zone</div>')
+                    forge_anchor = gr.Radio(
+                        choices=[
+                            "Top-Left",    "Top-Center",    "Top-Right",
+                            "Middle-Left", "Center",        "Middle-Right",
+                            "Bottom-Left", "Bottom-Center", "Bottom-Right",
+                        ],
+                        value="Center",
+                        label="",
+                        elem_classes=["position-grid"],
+                    )
+                    forge_btn = gr.Button("Generate Forged Image", variant="primary")
+
+                # ── Right column: outputs ─────────────────────────────────────
+                with gr.Column(scale=1, min_width=260):
+                    forge_out_img  = gr.Image(type="pil", label="Forged Image",
+                                              elem_classes=["small-img"], height=180)
+                    forge_heatmap  = gr.Image(type="pil", label="Forgery Heatmap",
+                                              elem_classes=["small-img"], height=180)
+                    forge_result   = gr.Markdown(elem_classes=["out-md"])
+
+            forge_btn.click(forge_image,
+                            inputs=[forge_wm_img, forge_orig_img,
+                                    forge_num, forge_size, forge_anchor],
+                            outputs=[forge_out_img, forge_heatmap, forge_result])
 
     gr.HTML("""
     <div class="dm-footer">
