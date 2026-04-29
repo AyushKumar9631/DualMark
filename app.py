@@ -160,31 +160,34 @@ def detect_forgery(image):
     manip = prob_map.mean().item()
     p     = prob_map.squeeze().cpu().numpy()
 
-    # ── High-pass residual heatmap (center-bias fix) ─────────────────────────
-    # Root cause: the model was trained on CelebA-HQ where faces are always
-    # centered, so it outputs an elevated baseline across the entire face region
-    # for EVERY image, forged or not.
+    # ── Modal-baseline heatmap (center-bias fix) ──────────────────────────────
+    # WHY Gaussian subtraction failed: the face mound on a 128×128 CelebA-HQ
+    # image is nearly FLAT across the whole frame, not a sharp bell curve.
+    # A Gaussian blur of a flat field ≈ the field itself, so residual ≈ field,
+    # and we're back to the original problem.
     #
-    # Fix A — large-sigma Gaussian subtraction:
-    #   sigma=30 on a 128×128 map blurs across the whole face mound.
-    #   An authentic face is a smooth, slow-varying blob → the blur tracks it
-    #   almost perfectly → residual ≈ 0 everywhere → all blue.
-    #   A splice patch is a sharp local spike the blur can't follow →
-    #   residual is large exactly at the patch → red only there.
+    # NEW APPROACH — modal baseline:
+    #   Build a histogram of all 128×128 probability values.
+    #   The histogram peak (mode) is the most common probability level.
+    #   On authentic images the face region dominates the pixel count, so
+    #   modal ≈ face-bias baseline (~0.55–0.70).
+    #   On forged images the authentic face still dominates, so modal is
+    #   the same face-bias baseline.
+    #   → Subtract modal from every pixel; only pixels ABOVE the baseline
+    #     (i.e. splice patches) survive. Authentic faces go to ≈ 0 → blue.
     #
-    # Fix B — absolute scaling instead of r_max normalization:
-    #   The old code used  p_norm = residual / r_max.  This is the real killer:
-    #   even a tiny residual (e.g. 0.05) becomes fully red after division.
-    #   Instead we use a fixed ANOMALY_SCALE so that only genuinely large
-    #   residuals (splice patches push ~0.15–0.30) map to red.
-    #   Authentic images have residual < 0.05 everywhere → stays blue.
-    from scipy.ndimage import gaussian_filter as _gf
-    p_f        = p.astype(np.float32)
-    p_smooth   = _gf(p_f, sigma=30)
-    p_residual = np.clip(p_f - p_smooth, 0, None)   # only positive deviations
+    # Absolute scale: splice patches typically push probabilities 0.15–0.30
+    # above the face baseline. Residuals below that threshold stay blue.
+    p_flat    = p.ravel()
+    hist, bin_edges = np.histogram(p_flat, bins=30, range=(0.0, 1.0))
+    modal_idx = int(np.argmax(hist))
+    baseline  = float((bin_edges[modal_idx] + bin_edges[modal_idx + 1]) / 2)
+    # Floor the baseline so background-heavy images don't flag the face area.
+    baseline  = max(baseline, 0.35)
 
-    ANOMALY_SCALE = 0.15          # residual at which a pixel appears fully red
-    p_norm = np.clip(p_residual / ANOMALY_SCALE, 0, 1)
+    p_above = np.clip(p - baseline, 0, None)
+    SCALE   = 0.15   # residual at which a pixel appears fully red
+    p_norm  = np.clip(p_above / SCALE, 0, 1)
 
     heatmap        = np.zeros((p.shape[0], p.shape[1], 3), dtype=np.uint8)
     heatmap[:,:,0] = (p_norm * 255).clip(0, 255).astype(np.uint8)
