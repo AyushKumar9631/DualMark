@@ -179,7 +179,7 @@ def detect_forgery(image):
     p_sm       = _gf(p, sigma=3)          # light smooth to get a clean blob
     center_mask = p_sm > 0.50             # True = face/center bias region
 
-    thresh = np.where(center_mask, 0.90, 0.60)   # spatially adaptive bar
+    thresh = np.where(center_mask, 0.95, 0.60)   # spatially adaptive bar
     p_above = np.clip(p - thresh, 0, None)
 
     # SCALE=0.10 → pixel at p=0.90 starts showing; p=1.00 is fully red
