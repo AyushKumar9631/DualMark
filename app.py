@@ -90,35 +90,60 @@ def verify_watermark(image, caption, user_id):
         return "Caption and User ID are required to verify."
 
     img_t  = pil_to_tensor(image)
-    wm_gt  = make_watermark(caption.strip(), user_id.strip())
+    wm_gt  = make_watermark(caption.strip(), user_id.strip())  # (128,) ±1 tensor
 
     with torch.no_grad():
         pred = decR(img_t)
 
-    ba = bit_accuracy(pred.squeeze(0).cpu(), wm_gt)
-    result = decode_watermark(pred.squeeze(0).cpu())
+    pred_cpu = pred.squeeze(0).cpu()
+    result   = decode_watermark(pred_cpu)
     cap_hex, uid_hex = expected_hashes(caption.strip(), user_id.strip())
 
-    if ba >= 0.85:
-        status  = "VERIFIED"
-        verdict = "Strong match. Ownership confirmed."
-    elif ba >= 0.70:
-        status  = "PARTIAL MATCH"
-        verdict = "Weak match. Image may have been compressed or resized."
+    # ── Per-segment bit accuracy (caption = bits 0:96, userid = bits 96:128) ──
+    ba_cap = bit_accuracy(pred_cpu[:96],  wm_gt[:96])
+    ba_uid = bit_accuracy(pred_cpu[96:],  wm_gt[96:])
+
+    # ── Owner Identification (UserID hash, 32 bits) ──
+    if ba_uid >= 0.85:
+        uid_status  = "✅ OWNER CONFIRMED"
+        uid_verdict = "UserID hash matches. Ownership is verified."
+    elif ba_uid >= 0.70:
+        uid_status  = "⚠️ UNCERTAIN"
+        uid_verdict = "Weak match. Image may have been compressed or resized."
     else:
-        status  = "NOT VERIFIED"
-        verdict = "No match. Incorrect Caption/UserID or watermark is absent."
+        uid_status  = "❌ OWNER MISMATCH"
+        uid_verdict = "UserID hash does not match. This User ID did not watermark this image."
+
+    # ── Caption Integrity (caption hash, 96 bits) ──
+    if ba_cap >= 0.85:
+        cap_status  = "✅ CAPTION INTACT"
+        cap_verdict = "Caption hash matches. The caption has not been altered."
+    elif ba_cap >= 0.70:
+        cap_status  = "⚠️ UNCERTAIN"
+        cap_verdict = "Weak match. Minor degradation may have affected the caption bits."
+    else:
+        cap_status  = "❌ CAPTION MISMATCH"
+        cap_verdict = "Caption hash does not match. The caption may have been changed or is incorrect."
 
     info = (
-        f"**Verification Result:** {status}\n\n"
+        f"---\n"
+        f"### 🔐 Owner Identification\n\n"
+        f"**Result:** {uid_status}\n\n"
         f"| Metric | Value |\n|---|---|\n"
-        f"| Bit Accuracy | `{ba*100:.1f}%` (random baseline = 50%) |\n"
-        f"| Decision Threshold | `85%` |\n"
-        f"| Verdict | {verdict} |\n\n"
-        f"**Hash Comparison**\n\n"
+        f"| UserID Bit Accuracy | `{ba_uid*100:.1f}%` (random baseline = 50%) |\n"
+        f"| Threshold | `85%` |\n"
+        f"| Verdict | {uid_verdict} |\n\n"
         f"| Field | Expected | Decoded |\n|---|---|---|\n"
-        f"| Caption Hash | `{cap_hex}` | `{result['caption_hex']}` |\n"
-        f"| UserID Hash  | `{uid_hex}` | `{result['userid_hex']}` |"
+        f"| UserID Hash | `{uid_hex}` | `{result['userid_hex']}` |\n\n"
+        f"---\n"
+        f"### 📝 Caption Integrity\n\n"
+        f"**Result:** {cap_status}\n\n"
+        f"| Metric | Value |\n|---|---|\n"
+        f"| Caption Bit Accuracy | `{ba_cap*100:.1f}%` (random baseline = 50%) |\n"
+        f"| Threshold | `85%` |\n"
+        f"| Verdict | {cap_verdict} |\n\n"
+        f"| Field | Expected | Decoded |\n|---|---|---|\n"
+        f"| Caption Hash | `{cap_hex}` | `{result['caption_hex']}` |"
     )
     return info
 
@@ -549,8 +574,8 @@ with gr.Blocks(title="DualMark — Invisible Watermarking", css=css, theme=gr.th
                             outputs=[embed_img_out, embed_info])
 
         # ── Verify ────────────────────────────────────────────────────────────
-        with gr.TabItem("Verify Ownership"):
-            gr.HTML('<div class="tab-desc">Upload a watermarked image and provide the original caption and user ID. Decoder R will attempt to recover the embedded message and compare it against the expected hash.</div>')
+        with gr.TabItem("Ownership & Caption Integrity"):
+            gr.HTML('<div class="tab-desc">Upload a watermarked image and provide the original caption and user ID. Decoder R recovers the embedded 128-bit message and runs two independent checks: the <strong>32-bit UserID hash</strong> identifies the owner, and the <strong>96-bit Caption hash</strong> verifies that the caption has not been altered.</div>')
             with gr.Row():
                 with gr.Column(scale=1, min_width=260):
                     verify_img     = gr.Image(type="pil", label="Watermarked Image",
